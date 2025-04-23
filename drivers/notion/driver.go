@@ -286,6 +286,7 @@ func (d *Notion) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 			return nil, fmt.Errorf("获取子目录列表失败: %v", err)
 		}
 
+		// 递归复制子目录
 		for _, subDir := range subDirs {
 			// 创建子目录对象
 			subDirObj := &model.Object{

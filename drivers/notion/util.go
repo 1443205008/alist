@@ -130,8 +130,9 @@ func (s *NotionService) UploadAndUpdateFile(filePath string, id string) error {
 		return fmt.Errorf("上传到S3失败: %v", err)
 	}
 
+	fileName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filepath.Base(filePath)))
 	// 3. 更新文件状态
-	err = s.UpdateFileStatus(record, filepath.Base(filePath), uploadResponse.URL)
+	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
 	if err != nil {
 		return fmt.Errorf("更新文件状态失败: %v", err)
 	}
@@ -187,10 +188,11 @@ func (s *NotionService) UploadFile(filePath string, recordInfo RecordInfo) (*Upl
 	if err != nil {
 		return nil, fmt.Errorf("无法读取文件: %v", err)
 	}
-
+	// 去除文件后缀
+	fileName := strings.TrimSuffix(fileInfo.Name(), filepath.Ext(fileInfo.Name()))
 	reqBody := UploadFileRequest{
 		Bucket:              "secure",
-		Name:                fileInfo.Name(),
+		Name:                fileName,
 		ContentType:         GetContentType(fileInfo.Name()),
 		Record:              recordInfo,
 		SupportExtraHeaders: true,

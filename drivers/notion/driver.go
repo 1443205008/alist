@@ -45,6 +45,27 @@ func (d *Notion) Init(ctx context.Context) error {
 		return fmt.Errorf("迁移数据库失败: %v", err)
 	}
 
+	// 检查是否存在根目录，如果不存在则创建
+	var rootDir Directory
+	if err := db.Where("id = ?", 0).First(&rootDir).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			// 创建根目录
+			rootDir = Directory{
+				ID:        0,
+				Name:      "/",
+				ParentID:  nil,
+				Deleted:   false,
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+			}
+			if err := db.Create(&rootDir).Error; err != nil {
+				return fmt.Errorf("创建根目录失败: %v", err)
+			}
+		} else {
+			return fmt.Errorf("检查根目录失败: %v", err)
+		}
+	}
+
 	// 初始化Notion客户端
 	d.notionClient = NewNotionService(d.NotionCookie, d.NotionToken, d.NotionSpaceID, d.NotionDatabaseID)
 	d.db = db

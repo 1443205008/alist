@@ -31,7 +31,7 @@ func NewNotionService(cookie, token, spaceID, databaseID string) *NotionService 
 	}
 }
 
-// CalculateFileSHA1 计算文件的SHA1值
+// 计算文件的SHA1值
 func (s *NotionService) CalculateFileSHA1(filePath string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {

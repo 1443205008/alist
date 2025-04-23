@@ -48,11 +48,11 @@ func (d *Notion) Init(ctx context.Context) error {
 
 	// 检查是否存在根目录，如果不存在则创建
 	var rootDir Directory
-	if err := db.Where("id = ?", 0).First(&rootDir).Error; err != nil {
+	if err := db.Where("id = ?", 1).First(&rootDir).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			// 创建根目录
 			rootDir = Directory{
-				ID:        0,
+				ID:        1,
 				Name:      "/",
 				ParentID:  nil,
 				Deleted:   false,
@@ -80,7 +80,7 @@ func (d *Notion) Drop(ctx context.Context) error {
 
 func (d *Notion) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
 	var objs []model.Obj
-	dirID := 0
+	dirID := 1
 	if dir != nil {
 		id, _ := strconv.Atoi(dir.GetID())
 		dirID = id
@@ -138,7 +138,7 @@ func (d *Notion) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 }
 
 func (d *Notion) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
-	parentID := 0
+	parentID := 1
 	if parentDir != nil {
 		id, _ := strconv.Atoi(parentDir.GetID())
 		parentID = id

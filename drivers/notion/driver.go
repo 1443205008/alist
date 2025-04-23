@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/errs"

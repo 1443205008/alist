@@ -44,6 +44,7 @@ import (
 	_ "github.com/alist-org/alist/v3/drivers/misskey"
 	_ "github.com/alist-org/alist/v3/drivers/mopan"
 	_ "github.com/alist-org/alist/v3/drivers/netease_music"
+	_ "github.com/alist-org/alist/v3/drivers/notion"
 	_ "github.com/alist-org/alist/v3/drivers/onedrive"
 	_ "github.com/alist-org/alist/v3/drivers/onedrive_app"
 	_ "github.com/alist-org/alist/v3/drivers/onedrive_sharelink"

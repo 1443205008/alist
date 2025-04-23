@@ -234,63 +234,71 @@ func (s *NotionService) UploadFile(filePath string, recordInfo RecordInfo) (*Upl
 }
 
 func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("无法打开文件: %v", err)
-	}
-	defer file.Close()
+    file, err := os.Open(filePath)
+    if err != nil {
+        return fmt.Errorf("无法打开文件: %v", err)
+    }
 
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
+    // 创建 pipe，实现边写边读
+    pr, pw := io.Pipe()
+    writer := multipart.NewWriter(pw)
 
-	// 添加所有字段
-	writer.WriteField("Content-Type", fields.ContentType)
-	writer.WriteField("x-amz-storage-class", fields.XAmzStorageClass)
-	writer.WriteField("tagging", fields.Tagging)
-	writer.WriteField("bucket", fields.Bucket)
-	writer.WriteField("X-Amz-Algorithm", fields.XAmzAlgorithm)
-	writer.WriteField("X-Amz-Credential", fields.XAmzCredential)
-	writer.WriteField("X-Amz-Date", fields.XAmzDate)
-	writer.WriteField("X-Amz-Security-Token", fields.XAmzSecurityToken)
-	writer.WriteField("key", fields.Key)
-	writer.WriteField("Policy", fields.Policy)
-	writer.WriteField("X-Amz-Signature", fields.XAmzSignature)
+    // 异步写入 multipart 数据（避免占用内存）
+    go func() {
+        defer pw.Close()
+        defer file.Close()
 
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
-	if err != nil {
-		return fmt.Errorf("创建文件表单字段失败: %v", err)
-	}
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return fmt.Errorf("复制文件内容失败: %v", err)
-	}
+        // 写字段
+        writer.WriteField("Content-Type", fields.ContentType)
+        writer.WriteField("x-amz-storage-class", fields.XAmzStorageClass)
+        writer.WriteField("tagging", fields.Tagging)
+        writer.WriteField("bucket", fields.Bucket)
+        writer.WriteField("X-Amz-Algorithm", fields.XAmzAlgorithm)
+        writer.WriteField("X-Amz-Credential", fields.XAmzCredential)
+        writer.WriteField("X-Amz-Date", fields.XAmzDate)
+        writer.WriteField("X-Amz-Security-Token", fields.XAmzSecurityToken)
+        writer.WriteField("key", fields.Key)
+        writer.WriteField("Policy", fields.Policy)
+        writer.WriteField("X-Amz-Signature", fields.XAmzSignature)
 
-	err = writer.Close()
-	if err != nil {
-		return fmt.Errorf("关闭multipart writer失败: %v", err)
-	}
+        // 写入文件字段，注意这里是写入流
+        part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+        if err != nil {
+            pw.CloseWithError(fmt.Errorf("创建文件字段失败: %v", err))
+            return
+        }
 
-	req, err := http.NewRequest("POST", S3BaseURL, body)
-	if err != nil {
-		return fmt.Errorf("创建请求失败: %v", err)
-	}
+        _, err = io.Copy(part, file)
+        if err != nil {
+            pw.CloseWithError(fmt.Errorf("复制文件内容失败: %v", err))
+            return
+        }
 
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+        writer.Close() // 结束 multipart 内容
+    }()
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("发送请求失败: %v", err)
-	}
-	defer resp.Body.Close()
+    // 创建请求，用 pr（pipe reader）作为请求体
+    req, err := http.NewRequest("POST", S3BaseURL, pr)
+    if err != nil {
+        return fmt.Errorf("创建请求失败: %v", err)
+    }
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("上传失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
-	}
+    req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	fmt.Printf("文件上传成功，状态码: %d\n", resp.StatusCode)
-	return nil
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        return fmt.Errorf("发送请求失败: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+        body, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("上传失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+    }
+
+    fmt.Printf("文件上传成功，状态码: %d\n", resp.StatusCode)
+    return nil
 }
 
 func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fileURL string) error {

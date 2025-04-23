@@ -359,7 +359,7 @@ func (d *Notion) Remove(ctx context.Context, obj model.Obj) error {
 
 func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 	// 创建临时文件
-	tempFile, err := os.CreateTemp("", "notion-*."+filepath.Ext(file.GetName()))
+	tempFile, err := os.CreateTemp("", filepath.Base(file.GetName()))
 	if err != nil {
 		return nil, fmt.Errorf("创建临时文件失败: %v", err)
 	}

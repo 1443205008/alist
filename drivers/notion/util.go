@@ -248,12 +248,50 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 		return fmt.Errorf("获取文件信息失败: %v", err)
 	}
 	fileSize := fileInfo.Size()
+	// 创建带限速的文件流
+	rateLimited := io.LimitReader(file, fileSize)
 
 	// 创建 pipe，实现边写边读
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
 
-	// 异步写入 multipart 数据（避免占用内存）
+	// 计算 multipart 表单的边界长度
+	boundary := writer.Boundary()
+	boundaryPrefix := "--" + boundary + "\r\n"
+	boundarySuffix := "\r\n--" + boundary + "--\r\n"
+	boundaryLength := len(boundaryPrefix) + len(boundarySuffix)
+
+	// 计算表单字段的总长度
+	fieldsLength := 0
+	// 每个字段的格式: Content-Disposition: form-data; name="fieldname"\r\n\r\nvalue\r\n
+	fieldHeader := "Content-Disposition: form-data; name=\""
+	fieldFooter := "\"\r\n\r\n"
+	fieldEnd := "\r\n"
+
+	fieldsLength += len(fieldHeader + "Content-Type" + fieldFooter + fields.ContentType + fieldEnd)
+	fieldsLength += len(fieldHeader + "x-amz-storage-class" + fieldFooter + fields.XAmzStorageClass + fieldEnd)
+	fieldsLength += len(fieldHeader + "tagging" + fieldFooter + fields.Tagging + fieldEnd)
+	fieldsLength += len(fieldHeader + "bucket" + fieldFooter + fields.Bucket + fieldEnd)
+	fieldsLength += len(fieldHeader + "X-Amz-Algorithm" + fieldFooter + fields.XAmzAlgorithm + fieldEnd)
+	fieldsLength += len(fieldHeader + "X-Amz-Credential" + fieldFooter + fields.XAmzCredential + fieldEnd)
+	fieldsLength += len(fieldHeader + "X-Amz-Date" + fieldFooter + fields.XAmzDate + fieldEnd)
+	fieldsLength += len(fieldHeader + "X-Amz-Security-Token" + fieldFooter + fields.XAmzSecurityToken + fieldEnd)
+	fieldsLength += len(fieldHeader + "key" + fieldFooter + fields.Key + fieldEnd)
+	fieldsLength += len(fieldHeader + "Policy" + fieldFooter + fields.Policy + fieldEnd)
+	fieldsLength += len(fieldHeader + "X-Amz-Signature" + fieldFooter + fields.XAmzSignature + fieldEnd)
+
+	// 计算文件字段的头部长度
+	fileHeader := "Content-Disposition: form-data; name=\"file\"; filename=\"" + filepath.Base(filePath) + "\"\r\n"
+	fileHeader += "Content-Type: " + fields.ContentType + "\r\n\r\n"
+	fileHeaderLength := len(fileHeader)
+
+	// 计算总长度
+	totalLength := int64(boundaryLength + fieldsLength + fileHeaderLength) + fileSize
+
+	// 创建错误通道
+	errChan := make(chan error, 1)
+
+	// 异步写入 multipart 数据
 	go func() {
 		defer pw.Close()
 		defer file.Close()
@@ -271,23 +309,24 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 		writer.WriteField("Policy", fields.Policy)
 		writer.WriteField("X-Amz-Signature", fields.XAmzSignature)
 
-		// 写入文件字段，注意这里是写入流
+		// 写入文件字段
 		part, err := writer.CreateFormFile("file", filepath.Base(filePath))
 		if err != nil {
 			pw.CloseWithError(fmt.Errorf("创建文件字段失败: %v", err))
 			return
 		}
 
-		_, err = io.Copy(part, file)
+		// 使用带限速的文件流
+		_, err = io.Copy(part, rateLimited)
 		if err != nil {
 			pw.CloseWithError(fmt.Errorf("复制文件内容失败: %v", err))
 			return
 		}
 
-		writer.Close() // 结束 multipart 内容
+		writer.Close()
 	}()
 
-	// 创建请求，用 pr（pipe reader）作为请求体
+	// 创建请求
 	req, err := http.NewRequestWithContext(context.Background(), "POST", S3BaseURL, pr)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %v", err)
@@ -295,14 +334,26 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 
 	// 设置请求头
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Content-Length", strconv.FormatInt(fileSize, 10))
+	req.Header.Set("Content-Length", strconv.FormatInt(totalLength, 10))
 
-	client := &http.Client{}
+	// 创建带超时的客户端
+	client := &http.Client{
+		Timeout: 30 * time.Minute, // 设置较长的超时时间，适合大文件上传
+	}
+
+	// 发送请求
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("发送请求失败: %v", err)
 	}
 	defer resp.Body.Close()
+
+	// 检查是否有写入错误
+	select {
+	case err := <-errChan:
+		return err
+	default:
+	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)

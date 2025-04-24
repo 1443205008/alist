@@ -24,13 +24,43 @@ const (
 	S3BaseURL        = "https://prod-files-secure.s3.us-west-2.amazonaws.com/"
 )
 
-func NewNotionService(cookie, token, spaceID, databaseID string) *NotionService {
+func NewNotionService(cookie, token, spaceID, databaseID string, filePageID string) *NotionService {
+	//从cookie中获取userId
+	userId := extractUserID(cookie)
+	if userId == "" {
+		fmt.Println("无法从cookie中提取userId")
+		return nil
+	}
+	// 创建 NotionService 实例
 	return &NotionService{
 		cookie:     cookie,
 		token:      token,
 		spaceID:    spaceID,
 		databaseID: databaseID,
+		filePageID: filePageID,
+		userId:     userId,
 	}
+}
+
+// extractUserID 从cookie字符串中提取 notion_user_id
+func extractUserID(cookie string) string {
+	// 查找 "notion_user_id=" 后面的部分
+	start := strings.Index(cookie, "notion_user_id=")
+	if start == -1 {
+		return ""
+	}
+	start += len("notion_user_id=")
+
+	// 查找 user_id 后的分号
+	end := strings.Index(cookie[start:], ";")
+	if end == -1 {
+		end = len(cookie)
+	} else {
+		end += start
+	}
+
+	// 提取并返回 user_id
+	return cookie[start:end]
 }
 
 // 计算文件的SHA1值
@@ -499,7 +529,7 @@ func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fil
 							Table:   record.Table,
 							SpaceID: record.SpaceID,
 						},
-						Path:    []string{"properties", "_N\\S"},
+						Path:    []string{"properties", s.filePageID},
 						Command: "set",
 						Args: []interface{}{
 							[]interface{}{
@@ -523,7 +553,7 @@ func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fil
 						Command: "update",
 						Args: map[string]interface{}{
 							"last_edited_time":     currentTime,
-							"last_edited_by_id":    "cbd3714f-c4b7-4ba9-863c-7b48e3f30663",
+							"last_edited_by_id":    s.userId,
 							"last_edited_by_table": "notion_user",
 						},
 					},

@@ -68,7 +68,7 @@ func (d *Notion) Init(ctx context.Context) error {
 	}
 
 	// 初始化Notion客户端
-	d.notionClient = NewNotionService(d.NotionCookie, d.NotionToken, d.NotionSpaceID, d.NotionDatabaseID)
+	d.notionClient = NewNotionService(d.NotionCookie, d.NotionToken, d.NotionSpaceID, d.NotionDatabaseID, d.NotionFilePageID)
 	d.db = db
 
 	return nil
@@ -127,7 +127,7 @@ func (d *Notion) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		return nil, fmt.Errorf("获取文件信息失败: %v", err)
 	}
 
-	property, err := d.notionClient.GetPageProperty(f.NotionPageID, "_N\\S")
+	property, err := d.notionClient.GetPageProperty(f.NotionPageID, d.NotionFilePageID)
 	if err != nil {
 		return nil, fmt.Errorf("获取文件URL失败: %v", err)
 	}
@@ -360,7 +360,7 @@ func (d *Notion) Remove(ctx context.Context, obj model.Obj) error {
 
 func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 	// 创建临时文件
-	tempFile, err := os.CreateTemp("", filepath.Base(file.GetName()) + ".*")
+	tempFile, err := os.CreateTemp("", filepath.Base(file.GetName())+".*")
 	if err != nil {
 		return nil, fmt.Errorf("创建临时文件失败: %v", err)
 	}

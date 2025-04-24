@@ -9,6 +9,8 @@ type NotionService struct {
 	token      string
 	spaceID    string
 	databaseID string
+	filePageID string
+	userId     string
 }
 
 type FileInfo struct {

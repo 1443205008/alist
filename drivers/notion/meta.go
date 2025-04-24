@@ -11,6 +11,7 @@ type Addition struct {
 	NotionToken      string `json:"notion_token" required:"true"`
 	NotionSpaceID    string `json:"notion_space_id" required:"true"`
 	NotionDatabaseID string `json:"notion_database_id" required:"true"`
+	NotionFilePageID string `json:"notion_file_page_id" required:"true"`
 	DBUser           string `json:"db_user" default:"root"`
 	DBPass           string `json:"db_pass" default:"123456"`
 	DBHost           string `json:"db_host" default:"localhost"`

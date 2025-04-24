@@ -443,14 +443,15 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 }
 
 func (s *NotionService) UploadToS3Put(filePath string, resp *UploadResponse) error {
-	//打印上传的URL
-	fmt.Printf("上传的URL: %s\n", resp.SignedPutUrl)
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("无法打开文件: %v", err)
 	}
 	defer file.Close()
-
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("获取文件信息失败: %v", err)
+	}
 	req, err := http.NewRequest("PUT", resp.SignedPutUrl, file)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %v", err)
@@ -458,10 +459,11 @@ func (s *NotionService) UploadToS3Put(filePath string, resp *UploadResponse) err
 
 	//设置请求头
 	for _, header := range resp.PutHeaders {
-		//打印请求头
-		fmt.Printf("请求头: %s: %s\n", header.Name, header.Value)
 		req.Header.Set(header.Name, header.Value)
 	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	// 手动设置 Content-Length
+	req.ContentLength = fileInfo.Size()
 	client := &http.Client{}
 	response, err := client.Do(req)
 	if err != nil {

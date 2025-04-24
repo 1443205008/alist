@@ -358,16 +358,14 @@ func (d *Notion) Remove(ctx context.Context, obj model.Obj) error {
 
 func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 
-	sha1 := "1313"
-
 	// 创建Notion页面
-	pageID, err := d.notionClient.CreateDatabasePage(filepath.Base(file.GetName()), sha1)
+	pageID, err := d.notionClient.CreateDatabasePage(filepath.Base(file.GetName()))
 	if err != nil {
 		return nil, fmt.Errorf("创建Notion页面失败: %v", err)
 	}
 
 	// 上传文件到Notion
-	err = d.notionClient.UploadAndUpdateFilePut(file, pageID)
+	hash1, err := d.notionClient.UploadAndUpdateFilePut(file, pageID)
 	if err != nil {
 		return nil, fmt.Errorf("上传文件到Notion失败: %v", err)
 	}
@@ -377,7 +375,7 @@ func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStrea
 	f := &File{
 		Name:         filepath.Base(file.GetName()),
 		Size:         file.GetSize(),
-		SHA1:         sha1,
+		SHA1:         hash1,
 		NotionPageID: pageID,
 		DirectoryID:  dirID,
 	}

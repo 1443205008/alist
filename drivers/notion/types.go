@@ -146,8 +146,7 @@ type Parent struct {
 }
 
 type Properties struct {
-	Title TitleProperty    `json:"Title"`
-	UUID  RichTextProperty `json:"UUID"`
+	Title TitleProperty `json:"Title"`
 }
 
 type TitleProperty struct {

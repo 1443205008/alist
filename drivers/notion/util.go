@@ -80,7 +80,7 @@ func (s *NotionService) CalculateFileSHA1(filePath string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func (s *NotionService) CreateDatabasePage(title string, uuid string) (string, error) {
+func (s *NotionService) CreateDatabasePage(title string) (string, error) {
 	reqBody := CreatePageRequest{
 		Parent: Parent{
 			DatabaseID: s.databaseID,
@@ -91,15 +91,6 @@ func (s *NotionService) CreateDatabasePage(title string, uuid string) (string, e
 					{
 						Text: TextContent{
 							Content: title,
-						},
-					},
-				},
-			},
-			UUID: RichTextProperty{
-				RichText: []RichText{
-					{
-						Text: TextContent{
-							Content: uuid,
 						},
 					},
 				},
@@ -173,7 +164,7 @@ func (s *NotionService) UploadAndUpdateFile(filePath string, id string) error {
 	return nil
 }
 
-func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id string) error {
+func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id string) (string, error) {
 	record := RecordInfo{
 		Table:   "block",
 		ID:      id,
@@ -182,23 +173,26 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 	// 1. 上传文件到Notion
 	uploadResponse, err := s.UploadFilePut(file, record)
 	if err != nil {
-		return fmt.Errorf("上传文件失败: %v", err)
+		return "", fmt.Errorf("上传文件失败: %v", err)
 	}
 
 	// 2. 上传文件到S3
-	err = s.UploadToS3Put(file, uploadResponse)
+	hash1, err := s.UploadToS3Put(file, uploadResponse)
 	if err != nil {
-		return fmt.Errorf("上传到S3失败: %v", err)
+		return "", fmt.Errorf("上传到S3失败: %v", err)
 	}
 
 	fileName := file.GetName()
 	// 3. 更新文件状态
 	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
+
+	// 4. 更新文件的SHA1值
+
 	if err != nil {
-		return fmt.Errorf("更新文件状态失败: %v", err)
+		return "", fmt.Errorf("更新文件状态失败: %v", err)
 	}
 
-	return nil
+	return hash1, nil
 }
 
 // GetContentType 根据文件后缀获取ContentType
@@ -468,10 +462,13 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 	return nil
 }
 
-func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadResponse) error {
-	req, err := http.NewRequest("PUT", resp.SignedPutUrl, file)
+func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadResponse) (string, error) {
+	// 创建 SHA-1 哈希计算器
+	hash := sha1.New()
+	tee := io.TeeReader(file, hash)
+	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee)
 	if err != nil {
-		return fmt.Errorf("创建请求失败: %v", err)
+		return "", fmt.Errorf("创建请求失败: %v", err)
 	}
 
 	//设置请求头
@@ -484,15 +481,18 @@ func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadRespo
 	client := &http.Client{}
 	response, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("发送请求失败: %v", err)
+		return "", fmt.Errorf("发送请求失败: %v", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
+		return "", fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
 	}
 	fmt.Printf("文件上传成功，状态码: %d\n", response.StatusCode)
-	return nil
+	// 计算文件的 SHA-1 值
+	sha1Value := hash.Sum(nil)
+	sha1Hex := hex.EncodeToString(sha1Value)
+	return sha1Hex, nil
 }
 
 func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fileURL string) error {

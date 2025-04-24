@@ -359,49 +359,8 @@ func (d *Notion) Remove(ctx context.Context, obj model.Obj) error {
 }
 
 func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
-	// 创建临时文件
-	tempFile, err := os.CreateTemp("", filepath.Base(file.GetName())+".*")
-	if err != nil {
-		return nil, fmt.Errorf("创建临时文件失败: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
-	defer tempFile.Close()
 
-	// 写入文件内容
-	if _, err := io.Copy(tempFile, file); err != nil {
-		return nil, fmt.Errorf("写入文件内容失败: %v", err)
-	}
-
-	// 计算文件SHA1
-	sha1, err := d.notionClient.CalculateFileSHA1(tempFile.Name())
-	if err != nil {
-		return nil, fmt.Errorf("计算SHA1失败: %v", err)
-	}
-
-	// 检查数据库中是否已存在相同SHA1的文件
-	var existingFile File
-	if err := d.db.Where("sha1 = ? AND deleted = ?", sha1, false).First(&existingFile).Error; err == nil {
-		// 如果文件已存在，直接创建新的文件记录，但使用已存在的NotionPageID
-		dirID, _ := strconv.Atoi(dstDir.GetID())
-		newFile := &File{
-			Name:         filepath.Base(file.GetName()),
-			Size:         file.GetSize(),
-			SHA1:         sha1,
-			NotionPageID: existingFile.NotionPageID,
-			DirectoryID:  dirID,
-		}
-		if err := d.db.Create(newFile).Error; err != nil {
-			return nil, fmt.Errorf("创建文件记录失败: %v", err)
-		}
-
-		return &model.Object{
-			ID:       strconv.Itoa(newFile.ID),
-			Name:     newFile.Name,
-			Size:     newFile.Size,
-			Modified: newFile.UpdatedAt,
-			IsFolder: false,
-		}, nil
-	}
+	sha1 := "1313"
 
 	// 创建Notion页面
 	pageID, err := d.notionClient.CreateDatabasePage(filepath.Base(file.GetName()), sha1)
@@ -410,7 +369,7 @@ func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStrea
 	}
 
 	// 上传文件到Notion
-	err = d.notionClient.UploadAndUpdateFilePut(tempFile.Name(), pageID)
+	err = d.notionClient.UploadAndUpdateFilePut(file, pageID)
 	if err != nil {
 		return nil, fmt.Errorf("上传文件到Notion失败: %v", err)
 	}

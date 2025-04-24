@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/google/uuid"
 )
 
@@ -172,25 +173,25 @@ func (s *NotionService) UploadAndUpdateFile(filePath string, id string) error {
 	return nil
 }
 
-func (s *NotionService) UploadAndUpdateFilePut(filePath string, id string) error {
+func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id string) error {
 	record := RecordInfo{
 		Table:   "block",
 		ID:      id,
 		SpaceID: s.spaceID,
 	}
 	// 1. 上传文件到Notion
-	uploadResponse, err := s.UploadFilePut(filePath, record)
+	uploadResponse, err := s.UploadFilePut(file, record)
 	if err != nil {
 		return fmt.Errorf("上传文件失败: %v", err)
 	}
 
 	// 2. 上传文件到S3
-	err = s.UploadToS3Put(filePath, uploadResponse)
+	err = s.UploadToS3Put(file, uploadResponse)
 	if err != nil {
 		return fmt.Errorf("上传到S3失败: %v", err)
 	}
 
-	fileName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filepath.Base(filePath)))
+	fileName := file.GetName()
 	// 3. 更新文件状态
 	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
 	if err != nil {
@@ -293,20 +294,15 @@ func (s *NotionService) UploadFile(filePath string, recordInfo RecordInfo) (*Upl
 	return &uploadResponse, nil
 }
 
-func (s *NotionService) UploadFilePut(filePath string, recordInfo RecordInfo) (*UploadResponse, error) {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("无法读取文件: %v", err)
-	}
-	// 去除文件后缀
-	fileName := strings.TrimSuffix(fileInfo.Name(), filepath.Ext(fileInfo.Name()))
+func (s *NotionService) UploadFilePut(file model.FileStreamer, recordInfo RecordInfo) (*UploadResponse, error) {
+	fileName := file.GetName()
 	reqBody := UploadFileRequest{
 		Bucket:              "secure",
 		Name:                fileName,
-		ContentType:         GetContentType(fileInfo.Name()),
+		ContentType:         file.GetMimetype(),
 		Record:              recordInfo,
 		SupportExtraHeaders: true,
-		ContentLength:       fileInfo.Size(),
+		ContentLength:       file.GetSize(),
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -472,16 +468,7 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 	return nil
 }
 
-func (s *NotionService) UploadToS3Put(filePath string, resp *UploadResponse) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("无法打开文件: %v", err)
-	}
-	defer file.Close()
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("获取文件信息失败: %v", err)
-	}
+func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadResponse) error {
 	req, err := http.NewRequest("PUT", resp.SignedPutUrl, file)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %v", err)
@@ -493,7 +480,7 @@ func (s *NotionService) UploadToS3Put(filePath string, resp *UploadResponse) err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	// 手动设置 Content-Length
-	req.ContentLength = fileInfo.Size()
+	req.ContentLength = file.GetSize()
 	client := &http.Client{}
 	response, err := client.Do(req)
 	if err != nil {

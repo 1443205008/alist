@@ -410,7 +410,7 @@ func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStrea
 	}
 
 	// 上传文件到Notion
-	err = d.notionClient.UploadAndUpdateFile(tempFile.Name(), pageID)
+	err = d.notionClient.UploadAndUpdateFilePut(tempFile.Name(), pageID)
 	if err != nil {
 		return nil, fmt.Errorf("上传文件到Notion失败: %v", err)
 	}

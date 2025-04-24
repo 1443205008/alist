@@ -2,8 +2,8 @@ package template
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"context"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -142,6 +142,34 @@ func (s *NotionService) UploadAndUpdateFile(filePath string, id string) error {
 	return nil
 }
 
+func (s *NotionService) UploadAndUpdateFilePut(filePath string, id string) error {
+	record := RecordInfo{
+		Table:   "block",
+		ID:      id,
+		SpaceID: s.spaceID,
+	}
+	// 1. 上传文件到Notion
+	uploadResponse, err := s.UploadFilePut(filePath, record)
+	if err != nil {
+		return fmt.Errorf("上传文件失败: %v", err)
+	}
+
+	// 2. 上传文件到S3
+	err = s.UploadToS3Put(filePath, uploadResponse)
+	if err != nil {
+		return fmt.Errorf("上传到S3失败: %v", err)
+	}
+
+	fileName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filepath.Base(filePath)))
+	// 3. 更新文件状态
+	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
+	if err != nil {
+		return fmt.Errorf("更新文件状态失败: %v", err)
+	}
+
+	return nil
+}
+
 // GetContentType 根据文件后缀获取ContentType
 func GetContentType(filename string) string {
 	ext := strings.ToLower(filepath.Ext(filename))
@@ -235,6 +263,56 @@ func (s *NotionService) UploadFile(filePath string, recordInfo RecordInfo) (*Upl
 	return &uploadResponse, nil
 }
 
+func (s *NotionService) UploadFilePut(filePath string, recordInfo RecordInfo) (*UploadResponse, error) {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("无法读取文件: %v", err)
+	}
+	// 去除文件后缀
+	fileName := strings.TrimSuffix(fileInfo.Name(), filepath.Ext(fileInfo.Name()))
+	reqBody := UploadFileRequest{
+		Bucket:              "secure",
+		Name:                fileName,
+		ContentType:         GetContentType(fileInfo.Name()),
+		Record:              recordInfo,
+		SupportExtraHeaders: true,
+		ContentLength:       fileInfo.Size(),
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", NotionAPIBaseURL+"/getUploadFileUrl", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	s.setPutCommonHeaders(req)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	fmt.Printf("上传文件请求状态: %s\n", resp.Status)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var uploadResponse UploadResponse
+	err = json.Unmarshal(body, &uploadResponse)
+	if err != nil {
+		return nil, err
+	}
+
+	return &uploadResponse, nil
+}
+
 func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -286,7 +364,7 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 	fileHeaderLength := len(fileHeader)
 
 	// 计算总长度
-	totalLength := int64(boundaryLength + fieldsLength + fileHeaderLength) + fileSize
+	totalLength := int64(boundaryLength+fieldsLength+fileHeaderLength) + fileSize
 
 	// 创建错误通道
 	errChan := make(chan error, 1)
@@ -361,6 +439,36 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 	}
 
 	fmt.Printf("文件上传成功，状态码: %d\n", resp.StatusCode)
+	return nil
+}
+
+func (s *NotionService) UploadToS3Put(filePath string, resp *UploadResponse) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("无法打开文件: %v", err)
+	}
+	defer file.Close()
+
+	req, err := http.NewRequest("PUT", resp.SignedPutUrl, file)
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %v", err)
+	}
+
+	//设置请求头
+	for _, header := range resp.PutHeaders {
+		req.Header.Set(header.Name, header.Value)
+	}
+	client := &http.Client{}
+	response, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("发送请求失败: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
+	}
+	fmt.Printf("文件上传成功，状态码: %d\n", response.StatusCode)
 	return nil
 }
 
@@ -451,6 +559,14 @@ func (s *NotionService) setCommonHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	req.Header.Set("notion-client-version", "23.13.0.2948")
 	req.Header.Set("notion-audit-log-platform", "web")
+	req.Header.Set("Cookie", s.cookie)
+}
+
+func (s *NotionService) setPutCommonHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	// req.Header.Set("notion-client-version", "23.13.0.2948")
+	// req.Header.Set("notion-audit-log-platform", "web")
 	req.Header.Set("Cookie", s.cookie)
 }
 

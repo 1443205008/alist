@@ -80,8 +80,15 @@ type UploadResponse struct {
 	URL                 string       `json:"url"`
 	SignedGetUrl        string       `json:"signedGetUrl"`
 	SignedUploadPostUrl string       `json:"signedUploadPostUrl"`
+	SignedPutUrl        string       `json:"signedPutUrl"`
 	PostHeaders         []string     `json:"postHeaders"`
+	PutHeaders          []putHeader  `json:"putHeaders"`
 	Fields              UploadFields `json:"fields"`
+}
+
+type putHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type UploadFields struct {

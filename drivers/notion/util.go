@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/google/uuid"
 )
@@ -164,7 +165,7 @@ func (s *NotionService) UploadAndUpdateFile(filePath string, id string) error {
 	return nil
 }
 
-func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id string) (string, error) {
+func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id string, up driver.UpdateProgress) (string, error) {
 	record := RecordInfo{
 		Table:   "block",
 		ID:      id,
@@ -177,7 +178,7 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 	}
 
 	// 2. 上传文件到S3
-	hash1, err := s.UploadToS3Put(file, uploadResponse)
+	hash1, err := s.UploadToS3Put(file, uploadResponse, up)
 	if err != nil {
 		return "", fmt.Errorf("上传到S3失败: %v", err)
 	}
@@ -462,11 +463,13 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 	return nil
 }
 
-func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadResponse) (string, error) {
+func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadResponse, up driver.UpdateProgress) (string, error) {
 	// 创建 SHA-1 哈希计算器
 	hash := sha1.New()
 	tee := io.TeeReader(file, hash)
-	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee)
+	progress := driver.NewProgress(file.GetSize(), up)
+	tee1 := io.TeeReader(tee, progress)
+	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee1)
 	if err != nil {
 		return "", fmt.Errorf("创建请求失败: %v", err)
 	}

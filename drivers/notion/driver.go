@@ -365,7 +365,7 @@ func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStrea
 	}
 
 	// 上传文件到Notion
-	hash1, err := d.notionClient.UploadAndUpdateFilePut(file, pageID)
+	hash1, err := d.notionClient.UploadAndUpdateFilePut(file, pageID, up)
 	if err != nil {
 		return nil, fmt.Errorf("上传文件到Notion失败: %v", err)
 	}

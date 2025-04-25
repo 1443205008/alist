@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -597,7 +598,9 @@ func (s *NotionService) setPutCommonHeaders(req *http.Request) {
 }
 
 func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*PropertyResponse, error) {
-	url := fmt.Sprintf("https://api.notion.com/v1/pages/%s/properties/%s", pageID, propertyID)
+	//propertyID 转义
+	propertyIDNew := url.PathEscape(propertyID)
+	url := fmt.Sprintf("https://api.notion.com/v1/pages/%s/properties/%s", pageID, propertyIDNew)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {

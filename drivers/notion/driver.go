@@ -381,7 +381,7 @@ func (d *Notion) Remove(ctx context.Context, obj model.Obj) error {
 				Name:     subDir.Name,
 				IsFolder: true,
 			}
-			if err := d.Remove(ctx, subObj); !errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := d.Remove(ctx, subObj); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("删除子目录 %s 失败: %v", subDir.Name, err)
 			}
 		}

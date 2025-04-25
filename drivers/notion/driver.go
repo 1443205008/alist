@@ -2,6 +2,7 @@ package template
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -141,6 +142,21 @@ func (d *Notion) MakeDir(ctx context.Context, parentDir model.Obj, dirName strin
 		id, _ := strconv.Atoi(parentDir.GetID())
 		parentID = id
 	}
+	//先检查是否存在同名目录
+	var existingDir Directory
+	if err := d.db.Where("parent_id = ? AND name = ? AND deleted = ?", parentID, dirName, false).First(&existingDir).Error; err == nil {
+		// 如果找到同名目录，直接返回该目录信息
+		return &model.Object{
+			ID:       strconv.Itoa(existingDir.ID),
+			Name:     existingDir.Name,
+			Size:     0,
+			Modified: existingDir.UpdatedAt,
+			IsFolder: true,
+		}, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		// 如果是其他错误,返回错误信息
+		return nil, fmt.Errorf("检查目录是否存在时发生错误: %v", err)
+	}
 
 	dir := &Directory{
 		Name:     dirName,
@@ -261,7 +277,7 @@ func (d *Notion) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 
 		// 复制目录下的所有文件
 		var files []File
-		if err := d.db.Where("directory_id = ? AND deleted = ?", srcDir.ID, false).Find(&files).Error; err != nil {
+		if err := d.db.Where("directory_id = ? AND deleted = ?", srcDir.ID, false).Find(&files).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("获取源目录文件列表失败: %v", err)
 		}
 
@@ -280,7 +296,7 @@ func (d *Notion) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 
 		// 递归复制子目录
 		var subDirs []Directory
-		if err := d.db.Where("parent_id = ? AND deleted = ?", srcDir.ID, false).Find(&subDirs).Error; err != nil {
+		if err := d.db.Where("parent_id = ? AND deleted = ?", srcDir.ID, false).Find(&subDirs).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("获取子目录列表失败: %v", err)
 		}
 
@@ -345,11 +361,32 @@ func (d *Notion) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 
 func (d *Notion) Remove(ctx context.Context, obj model.Obj) error {
 	if obj.IsDir() {
-		if err := d.db.Model(&Directory{}).Where("id = ?", obj.GetID()).Update("deleted", true).Error; err != nil {
+		if err := d.db.Model(&Directory{}).Where("id = ?", obj.GetID()).Update("deleted", true).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return fmt.Errorf("删除目录失败: %v", err)
 		}
+		// 删除目录下的所有文件
+		if err := d.db.Model(&File{}).Where("directory_id = ?", obj.GetID()).Update("deleted", true).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("删除目录下的文件失败: %v", err)
+		}
+
+		// 递归删除子目录及其文件
+		var subDirs []Directory
+		if err := d.db.Where("parent_id = ? AND deleted = ?", obj.GetID(), false).Find(&subDirs).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("获取子目录失败: %v", err)
+		}
+
+		for _, subDir := range subDirs {
+			subObj := &model.Object{
+				ID:       strconv.Itoa(subDir.ID),
+				Name:     subDir.Name,
+				IsFolder: true,
+			}
+			if err := d.Remove(ctx, subObj); !errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("删除子目录 %s 失败: %v", subDir.Name, err)
+			}
+		}
 	} else {
-		if err := d.db.Model(&File{}).Where("id = ?", obj.GetID()).Update("deleted", true).Error; err != nil {
+		if err := d.db.Model(&File{}).Where("id = ?", obj.GetID()).Update("deleted", true).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return fmt.Errorf("删除文件失败: %v", err)
 		}
 	}
@@ -358,6 +395,19 @@ func (d *Notion) Remove(ctx context.Context, obj model.Obj) error {
 
 func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 
+	// 检查是否存在同名文件
+	var existingFile File
+	if err := d.db.Where("name = ? AND directory_id = ? AND deleted = ?", filepath.Base(file.GetName()), dstDir.GetID(), false).First(&existingFile).Error; err == nil {
+		return &model.Object{
+			ID:       strconv.Itoa(existingFile.ID),
+			Name:     existingFile.Name,
+			Size:     existingFile.Size,
+			Modified: existingFile.UpdatedAt,
+			IsFolder: false,
+		}, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("检查文件是否存在时发生错误: %v", err)
+	}
 	// 创建Notion页面
 	pageID, err := d.notionClient.CreateDatabasePage(filepath.Base(file.GetName()))
 	if err != nil {

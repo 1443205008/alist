@@ -25,12 +25,13 @@ type FileInfo struct {
 }
 
 type Directory struct {
-	ID        int       `json:"id" gorm:"primaryKey"`
-	Name      string    `json:"name"`
-	ParentID  *int      `json:"parent_id"`
-	Deleted   bool      `json:"deleted" gorm:"default:false"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID         int       `json:"id" gorm:"primaryKey"`
+	Name       string    `json:"name"`
+	ParentID   *int      `json:"parent_id"`
+	DatabaseID string    `json:"database_id" gorm:"index"`
+	Deleted    bool      `json:"deleted" gorm:"default:false"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type File struct {

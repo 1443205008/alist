@@ -47,16 +47,16 @@ func (d *Notion) Init(ctx context.Context) error {
 
 	// 检查是否存在根目录，如果不存在则创建
 	var rootDir Directory
-	if err := db.Where("id = ?", 1).First(&rootDir).Error; err != nil {
+	if err := db.Where("parent_id IS NULL AND database_id = ?", d.NotionDatabaseID).First(&rootDir).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			// 创建根目录
 			rootDir = Directory{
-				ID:        1,
-				Name:      "/",
-				ParentID:  nil,
-				Deleted:   false,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
+				Name:       "/",
+				ParentID:   nil,
+				DatabaseID: d.NotionDatabaseID,
+				Deleted:    false,
+				CreatedAt:  time.Now(),
+				UpdatedAt:  time.Now(),
 			}
 			if err := db.Create(&rootDir).Error; err != nil {
 				return fmt.Errorf("创建根目录失败: %v", err)
@@ -87,7 +87,7 @@ func (d *Notion) List(ctx context.Context, dir model.Obj, args model.ListArgs) (
 
 	// 获取目录列表
 	var directories []Directory
-	if err := d.db.Where("parent_id = ? AND deleted = ?", dirID, false).Find(&directories).Error; err != nil {
+	if err := d.db.Where("parent_id = ? AND database_id = ? AND deleted = ?", dirID, d.NotionDatabaseID, false).Find(&directories).Error; err != nil {
 		return nil, fmt.Errorf("获取目录列表失败: %v", err)
 	}
 
@@ -159,8 +159,9 @@ func (d *Notion) MakeDir(ctx context.Context, parentDir model.Obj, dirName strin
 	}
 
 	dir := &Directory{
-		Name:     dirName,
-		ParentID: &parentID,
+		Name:       dirName,
+		ParentID:   &parentID,
+		DatabaseID: d.NotionDatabaseID,
 	}
 	if err := d.db.Create(dir).Error; err != nil {
 		return nil, fmt.Errorf("创建目录失败: %v", err)
@@ -268,8 +269,9 @@ func (d *Notion) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 		// 创建新目录
 		dstDirID, _ := strconv.Atoi(dstDir.GetID())
 		newDir := &Directory{
-			Name:     srcDir.Name,
-			ParentID: &dstDirID,
+			Name:       srcDir.Name,
+			ParentID:   &dstDirID,
+			DatabaseID: d.NotionDatabaseID,
 		}
 		if err := d.db.Create(newDir).Error; err != nil {
 			return nil, fmt.Errorf("创建目标目录失败: %v", err)

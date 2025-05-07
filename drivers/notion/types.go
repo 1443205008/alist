@@ -27,7 +27,7 @@ type FileInfo struct {
 type Directory struct {
 	ID         int       `json:"id" gorm:"primaryKey"`
 	Name       string    `json:"name"`
-	ParentID   *int      `json:"parent_id"`
+	ParentID   *int      `json:"parent_id" gorm:"index"`
 	DatabaseID string    `json:"database_id" gorm:"index"`
 	Deleted    bool      `json:"deleted" gorm:"default:false"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -38,9 +38,9 @@ type File struct {
 	ID           int       `json:"id" gorm:"primaryKey"`
 	Name         string    `json:"name"`
 	Size         int64     `json:"size"`
-	SHA1         string    `json:"sha1"`
+	SHA1         string    `json:"sha1" gorm:"index"`
 	NotionPageID string    `json:"notion_page_id"`
-	DirectoryID  int       `json:"directory_id"`
+	DirectoryID  int       `json:"directory_id" gorm:"index"`
 	Deleted      bool      `json:"deleted" gorm:"default:false"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`

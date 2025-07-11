@@ -257,6 +257,14 @@ func (c *ChunkFileStream) GetExist() model.Obj {
 	return nil
 }
 
+func (c *ChunkFileStream) CreateTime() time.Time {
+	return time.Now()
+}
+
+func (c *ChunkFileStream) GetHash() utils.HashInfo {
+	return utils.HashInfo{}
+}
+
 func (c *ChunkFileStream) SetExist(model.Obj) {
 }
 

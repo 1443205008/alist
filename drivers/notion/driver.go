@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -11,8 +12,17 @@ import (
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/pkg/http_range"
+	"github.com/alist-org/alist/v3/pkg/utils"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+)
+
+const (
+	// MaxChunkSize Notion单个文件最大支持5GB，我们设置为4.5GB留出余量
+	MaxChunkSize = 4.5 * 1024 * 1024 * 1024 // 4.5GB
+	// ChunkThreshold 超过5GB的文件启用分块
+	ChunkThreshold = 5 * 1024 * 1024 * 1024 // 5GB
 )
 
 type Notion struct {
@@ -40,7 +50,7 @@ func (d *Notion) Init(ctx context.Context) error {
 	}
 
 	// 自动迁移数据库表
-	err = db.AutoMigrate(&Directory{}, &File{})
+	err = db.AutoMigrate(&Directory{}, &File{}, &FileChunk{})
 	if err != nil {
 		return fmt.Errorf("迁移数据库失败: %v", err)
 	}
@@ -126,14 +136,35 @@ func (d *Notion) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		return nil, fmt.Errorf("获取文件信息失败: %v", err)
 	}
 
-	property, err := d.notionClient.GetPageProperty(f.NotionPageID, d.NotionFilePageID)
-	if err != nil {
-		return nil, fmt.Errorf("获取文件URL失败: %v", err)
-	}
+	// 检查是否为分块文件
+	if f.IsChunked {
+		// 获取所有分块信息
+		var chunks []FileChunk
+		if err := d.db.Where("file_id = ? AND deleted = ?", f.ID, false).Order("chunk_index").Find(&chunks).Error; err != nil {
+			return nil, fmt.Errorf("获取文件分块信息失败: %v", err)
+		}
 
-	return &model.Link{
-		URL: property.Files[0].File.URL,
-	}, nil
+		if len(chunks) == 0 {
+			return nil, fmt.Errorf("分块文件没有找到分块数据")
+		}
+
+		// 创建分块Range读取器
+		rangeReadCloser := NewChunkedRangeReadCloser(d.notionClient, chunks, f.Size)
+
+		return &model.Link{
+			RangeReadCloser: rangeReadCloser,
+		}, nil
+	} else {
+		// 单文件，返回直接URL
+		property, err := d.notionClient.GetPageProperty(f.NotionPageID, d.NotionFilePageID)
+		if err != nil {
+			return nil, fmt.Errorf("获取文件URL失败: %v", err)
+		}
+
+		return &model.Link{
+			URL: property.Files[0].File.URL,
+		}, nil
+	}
 }
 
 func (d *Notion) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
@@ -396,7 +427,6 @@ func (d *Notion) Remove(ctx context.Context, obj model.Obj) error {
 }
 
 func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
-
 	// 检查是否存在同名文件
 	var existingFile File
 	if err := d.db.Where("name = ? AND directory_id = ? AND deleted = ?", filepath.Base(file.GetName()), dstDir.GetID(), false).First(&existingFile).Error; err == nil {
@@ -410,8 +440,23 @@ func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStrea
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("检查文件是否存在时发生错误: %v", err)
 	}
+
+	fileSize := file.GetSize()
+	fileName := filepath.Base(file.GetName())
+	dirID, _ := strconv.Atoi(dstDir.GetID())
+
+	// 判断是否需要分块上传
+	if fileSize > ChunkThreshold {
+		return d.putChunkedFile(ctx, fileName, fileSize, dirID, file, up)
+	} else {
+		return d.putSingleFile(ctx, fileName, fileSize, dirID, file, up)
+	}
+}
+
+// putSingleFile 上传单个文件（小于5GB）
+func (d *Notion) putSingleFile(ctx context.Context, fileName string, fileSize int64, dirID int, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 	// 创建Notion页面
-	pageID, err := d.notionClient.CreateDatabasePage(filepath.Base(file.GetName()))
+	pageID, err := d.notionClient.CreateDatabasePage(fileName)
 	if err != nil {
 		return nil, fmt.Errorf("创建Notion页面失败: %v", err)
 	}
@@ -423,16 +468,109 @@ func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStrea
 	}
 
 	// 保存到数据库
-	dirID, _ := strconv.Atoi(dstDir.GetID())
 	f := &File{
-		Name:         filepath.Base(file.GetName()),
-		Size:         file.GetSize(),
+		Name:         fileName,
+		Size:         fileSize,
 		SHA1:         hash1,
 		NotionPageID: pageID,
 		DirectoryID:  dirID,
+		IsChunked:    false,
+		ChunkSize:    0,
 	}
 	if err := d.db.Create(f).Error; err != nil {
 		return nil, fmt.Errorf("保存文件信息失败: %v", err)
+	}
+
+	return &model.Object{
+		ID:       strconv.Itoa(f.ID),
+		Name:     f.Name,
+		Size:     f.Size,
+		Modified: f.UpdatedAt,
+		IsFolder: false,
+	}, nil
+}
+
+// putChunkedFile 上传分块文件（大于5GB）
+func (d *Notion) putChunkedFile(ctx context.Context, fileName string, fileSize int64, dirID int, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
+	// 计算分块数量
+	chunkCount := (fileSize + MaxChunkSize - 1) / MaxChunkSize
+
+	// 缓存文件到临时文件以支持多次读取
+	tempFile, err := file.CacheFullInTempFile()
+	if err != nil {
+		return nil, fmt.Errorf("缓存文件失败: %v", err)
+	}
+	defer tempFile.Close()
+
+	// 创建主文件记录
+	f := &File{
+		Name:        fileName,
+		Size:        fileSize,
+		DirectoryID: dirID,
+		IsChunked:   true,
+		ChunkSize:   MaxChunkSize,
+	}
+	if err := d.db.Create(f).Error; err != nil {
+		return nil, fmt.Errorf("创建文件记录失败: %v", err)
+	}
+
+	// 上传每个分块
+	var chunks []FileChunk
+	for i := int64(0); i < chunkCount; i++ {
+		if utils.IsCanceled(ctx) {
+			return nil, ctx.Err()
+		}
+
+		startOffset := i * MaxChunkSize
+		endOffset := startOffset + MaxChunkSize
+		if endOffset > fileSize {
+			endOffset = fileSize
+		}
+		chunkSize := endOffset - startOffset
+
+		// 创建分块页面
+		chunkName := fmt.Sprintf("%s.chunk%d", fileName, i)
+		pageID, err := d.notionClient.CreateDatabasePage(chunkName)
+		if err != nil {
+			return nil, fmt.Errorf("创建分块页面失败: %v", err)
+		}
+
+		// 创建分块读取器
+		chunkReader := io.NewSectionReader(tempFile, startOffset, chunkSize)
+		chunkStream := &ChunkFileStream{
+			Reader:   chunkReader,
+			name:     chunkName,
+			size:     chunkSize,
+			mimetype: file.GetMimetype(),
+		}
+
+		// 上传分块
+		chunkProgress := func(percentage float64) {
+			totalProgress := (float64(i) + percentage/100.0) / float64(chunkCount) * 100.0
+			up(totalProgress)
+		}
+
+		hash1, err := d.notionClient.UploadAndUpdateFilePut(chunkStream, pageID, chunkProgress)
+		if err != nil {
+			return nil, fmt.Errorf("上传分块%d失败: %v", i, err)
+		}
+
+		// 创建分块记录
+		chunk := FileChunk{
+			FileID:       f.ID,
+			ChunkIndex:   int(i),
+			ChunkSize:    chunkSize,
+			StartOffset:  startOffset,
+			EndOffset:    endOffset,
+			NotionPageID: pageID,
+			SHA1:         hash1,
+		}
+		chunks = append(chunks, chunk)
+	}
+
+	// 批量保存分块记录
+	if err := d.db.Create(&chunks).Error; err != nil {
+		return nil, fmt.Errorf("保存分块记录失败: %v", err)
 	}
 
 	return &model.Object{

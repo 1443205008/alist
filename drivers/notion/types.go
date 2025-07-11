@@ -1,7 +1,16 @@
 package template
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"time"
+
+	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/pkg/http_range"
+	"github.com/alist-org/alist/v3/pkg/utils"
 )
 
 type NotionService struct {
@@ -41,6 +50,23 @@ type File struct {
 	SHA1         string    `json:"sha1" gorm:"index"`
 	NotionPageID string    `json:"notion_page_id"`
 	DirectoryID  int       `json:"directory_id" gorm:"index"`
+	IsChunked    bool      `json:"is_chunked" gorm:"default:false"`
+	ChunkSize    int64     `json:"chunk_size" gorm:"default:0"`
+	Deleted      bool      `json:"deleted" gorm:"default:false"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// FileChunk 存储文件分块信息
+type FileChunk struct {
+	ID           int       `json:"id" gorm:"primaryKey"`
+	FileID       int       `json:"file_id" gorm:"index"`
+	ChunkIndex   int       `json:"chunk_index"`
+	ChunkSize    int64     `json:"chunk_size"`
+	StartOffset  int64     `json:"start_offset"`
+	EndOffset    int64     `json:"end_offset"`
+	NotionPageID string    `json:"notion_page_id"`
+	SHA1         string    `json:"sha1"`
 	Deleted      bool      `json:"deleted" gorm:"default:false"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -174,4 +200,243 @@ type CreatePageResponse struct {
 	ID         string     `json:"id"`
 	Parent     Parent     `json:"parent"`
 	Properties Properties `json:"properties"`
+}
+
+// ChunkFileStream 实现model.FileStreamer接口，用于分块上传
+type ChunkFileStream struct {
+	io.Reader
+	name     string
+	size     int64
+	mimetype string
+}
+
+func (c *ChunkFileStream) GetName() string {
+	return c.name
+}
+
+func (c *ChunkFileStream) GetSize() int64 {
+	return c.size
+}
+
+func (c *ChunkFileStream) GetMimetype() string {
+	return c.mimetype
+}
+
+func (c *ChunkFileStream) Close() error {
+	if closer, ok := c.Reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func (c *ChunkFileStream) GetID() string {
+	return ""
+}
+
+func (c *ChunkFileStream) GetPath() string {
+	return ""
+}
+
+func (c *ChunkFileStream) ModTime() time.Time {
+	return time.Now()
+}
+
+func (c *ChunkFileStream) IsDir() bool {
+	return false
+}
+
+func (c *ChunkFileStream) NeedStore() bool {
+	return false
+}
+
+func (c *ChunkFileStream) IsForceStreamUpload() bool {
+	return false
+}
+
+func (c *ChunkFileStream) GetExist() model.Obj {
+	return nil
+}
+
+func (c *ChunkFileStream) SetExist(model.Obj) {
+}
+
+func (c *ChunkFileStream) RangeRead(httpRange http_range.Range) (io.Reader, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (c *ChunkFileStream) CacheFullInTempFile() (model.File, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (c *ChunkFileStream) SetTmpFile(*os.File) {
+}
+
+func (c *ChunkFileStream) GetFile() model.File {
+	return nil
+}
+
+// ChunkedRangeReadCloser 处理分块文件的Range请求
+type ChunkedRangeReadCloser struct {
+	notionClient *NotionService
+	chunks       []FileChunk
+	fileSize     int64
+	utils.Closers
+}
+
+func NewChunkedRangeReadCloser(notionClient *NotionService, chunks []FileChunk, fileSize int64) *ChunkedRangeReadCloser {
+	return &ChunkedRangeReadCloser{
+		notionClient: notionClient,
+		chunks:       chunks,
+		fileSize:     fileSize,
+		Closers:      utils.EmptyClosers(),
+	}
+}
+
+func (c *ChunkedRangeReadCloser) RangeRead(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
+	if httpRange.Length == -1 {
+		httpRange.Length = c.fileSize - httpRange.Start
+	}
+
+	// 找到需要的分块
+	var neededChunks []FileChunk
+	requestEnd := httpRange.Start + httpRange.Length
+
+	for _, chunk := range c.chunks {
+		// 检查分块是否与请求范围重叠
+		if chunk.StartOffset < requestEnd && chunk.EndOffset > httpRange.Start {
+			neededChunks = append(neededChunks, chunk)
+		}
+	}
+
+	if len(neededChunks) == 0 {
+		return nil, fmt.Errorf("no chunks found for range %d-%d", httpRange.Start, requestEnd-1)
+	}
+
+	return &ChunkedReader{
+		notionClient: c.notionClient,
+		chunks:       neededChunks,
+		requestStart: httpRange.Start,
+		requestEnd:   requestEnd,
+		currentChunk: 0,
+	}, nil
+}
+
+// ChunkedReader 实现跨分块的流式读取
+type ChunkedReader struct {
+	notionClient   *NotionService
+	chunks         []FileChunk
+	requestStart   int64
+	requestEnd     int64
+	currentChunk   int
+	currentReader  io.ReadCloser
+	currentOffset  int64
+	totalRead      int64
+}
+
+func (r *ChunkedReader) Read(p []byte) (n int, err error) {
+	if r.totalRead >= r.requestEnd-r.requestStart {
+		return 0, io.EOF
+	}
+
+	// 如果当前没有reader或者当前reader已读完，切换到下一个分块
+	if r.currentReader == nil {
+		if r.currentChunk >= len(r.chunks) {
+			return 0, io.EOF
+		}
+
+		chunk := r.chunks[r.currentChunk]
+
+		// 获取分块的下载链接
+		property, err := r.notionClient.GetPageProperty(chunk.NotionPageID, r.notionClient.filePageID)
+		if err != nil {
+			return 0, fmt.Errorf("获取分块%d下载链接失败: %v", r.currentChunk, err)
+		}
+
+		if len(property.Files) == 0 {
+			return 0, fmt.Errorf("分块%d没有文件", r.currentChunk)
+		}
+
+		// 计算在当前分块中的读取范围
+		chunkStart := max(r.requestStart, chunk.StartOffset) - chunk.StartOffset
+		chunkEnd := min(r.requestEnd, chunk.EndOffset) - chunk.StartOffset
+
+		// 创建HTTP请求获取分块数据
+		reader, err := r.createChunkReader(property.Files[0].File.URL, chunkStart, chunkEnd-chunkStart)
+		if err != nil {
+			return 0, fmt.Errorf("创建分块%d读取器失败: %v", r.currentChunk, err)
+		}
+
+		r.currentReader = reader
+		r.currentOffset = chunkStart
+	}
+
+	// 从当前reader读取数据
+	remainingBytes := r.requestEnd - r.requestStart - r.totalRead
+	if int64(len(p)) > remainingBytes {
+		p = p[:remainingBytes]
+	}
+
+	n, err = r.currentReader.Read(p)
+	r.totalRead += int64(n)
+
+	if err == io.EOF {
+		r.currentReader.Close()
+		r.currentReader = nil
+		r.currentChunk++
+
+		// 如果还有更多数据要读取，继续下一个分块
+		if r.totalRead < r.requestEnd-r.requestStart && r.currentChunk < len(r.chunks) {
+			err = nil
+		}
+	}
+
+	return n, err
+}
+
+func (r *ChunkedReader) Close() error {
+	if r.currentReader != nil {
+		return r.currentReader.Close()
+	}
+	return nil
+}
+
+func (r *ChunkedReader) createChunkReader(url string, offset, length int64) (io.ReadCloser, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建HTTP请求失败: %v", err)
+	}
+
+	// 设置Range头
+	if length > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+	} else {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("发送HTTP请求失败: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("HTTP请求失败，状态码: %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
+}
+
+func max(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }

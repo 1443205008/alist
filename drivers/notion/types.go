@@ -1,4 +1,4 @@
-package template
+package notion
 
 import (
 	"context"
@@ -241,6 +241,14 @@ func (c *ChunkFileStream) ModTime() time.Time {
 	return time.Now()
 }
 
+func (c *ChunkFileStream) CreateTime() time.Time {
+	return time.Now()
+}
+
+func (c *ChunkFileStream) GetHash() utils.HashInfo {
+	return utils.HashInfo{}
+}
+
 func (c *ChunkFileStream) IsDir() bool {
 	return false
 }
@@ -255,14 +263,6 @@ func (c *ChunkFileStream) IsForceStreamUpload() bool {
 
 func (c *ChunkFileStream) GetExist() model.Obj {
 	return nil
-}
-
-func (c *ChunkFileStream) CreateTime() time.Time {
-	return time.Now()
-}
-
-func (c *ChunkFileStream) GetHash() utils.HashInfo {
-	return utils.HashInfo{}
 }
 
 func (c *ChunkFileStream) SetExist(model.Obj) {
@@ -301,14 +301,27 @@ func NewChunkedRangeReadCloser(notionClient *NotionService, chunks []FileChunk, 
 }
 
 func (c *ChunkedRangeReadCloser) RangeRead(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
+	// 边界检查
+	if httpRange.Start < 0 {
+		return nil, fmt.Errorf("invalid range start: %d", httpRange.Start)
+	}
+	if httpRange.Start >= c.fileSize {
+		return nil, fmt.Errorf("range start %d exceeds file size %d", httpRange.Start, c.fileSize)
+	}
+
 	if httpRange.Length == -1 {
 		httpRange.Length = c.fileSize - httpRange.Start
 	}
 
+	// 确保请求范围不超过文件大小
+	requestEnd := httpRange.Start + httpRange.Length
+	if requestEnd > c.fileSize {
+		httpRange.Length = c.fileSize - httpRange.Start
+		requestEnd = c.fileSize
+	}
+
 	// 找到需要的分块
 	var neededChunks []FileChunk
-	requestEnd := httpRange.Start + httpRange.Length
-
 	for _, chunk := range c.chunks {
 		// 检查分块是否与请求范围重叠
 		if chunk.StartOffset < requestEnd && chunk.EndOffset > httpRange.Start {
@@ -317,7 +330,8 @@ func (c *ChunkedRangeReadCloser) RangeRead(ctx context.Context, httpRange http_r
 	}
 
 	if len(neededChunks) == 0 {
-		return nil, fmt.Errorf("no chunks found for range %d-%d", httpRange.Start, requestEnd-1)
+		return nil, fmt.Errorf("no chunks found for range %d-%d (file size: %d, total chunks: %d)",
+			httpRange.Start, requestEnd-1, c.fileSize, len(c.chunks))
 	}
 
 	return &ChunkedReader{
@@ -331,14 +345,14 @@ func (c *ChunkedRangeReadCloser) RangeRead(ctx context.Context, httpRange http_r
 
 // ChunkedReader 实现跨分块的流式读取
 type ChunkedReader struct {
-	notionClient   *NotionService
-	chunks         []FileChunk
-	requestStart   int64
-	requestEnd     int64
-	currentChunk   int
-	currentReader  io.ReadCloser
-	currentOffset  int64
-	totalRead      int64
+	notionClient  *NotionService
+	chunks        []FileChunk
+	requestStart  int64
+	requestEnd    int64
+	currentChunk  int
+	currentReader io.ReadCloser
+	currentOffset int64
+	totalRead     int64
 }
 
 func (r *ChunkedReader) Read(p []byte) (n int, err error) {
@@ -354,24 +368,40 @@ func (r *ChunkedReader) Read(p []byte) (n int, err error) {
 
 		chunk := r.chunks[r.currentChunk]
 
-		// 获取分块的下载链接
-		property, err := r.notionClient.GetPageProperty(chunk.NotionPageID, r.notionClient.filePageID)
-		if err != nil {
-			return 0, fmt.Errorf("获取分块%d下载链接失败: %v", r.currentChunk, err)
-		}
-
-		if len(property.Files) == 0 {
-			return 0, fmt.Errorf("分块%d没有文件", r.currentChunk)
-		}
-
 		// 计算在当前分块中的读取范围
 		chunkStart := max(r.requestStart, chunk.StartOffset) - chunk.StartOffset
 		chunkEnd := min(r.requestEnd, chunk.EndOffset) - chunk.StartOffset
 
-		// 创建HTTP请求获取分块数据
-		reader, err := r.createChunkReader(property.Files[0].File.URL, chunkStart, chunkEnd-chunkStart)
-		if err != nil {
-			return 0, fmt.Errorf("创建分块%d读取器失败: %v", r.currentChunk, err)
+		// 重试逻辑：最多重试3次
+		var reader io.ReadCloser
+		maxRetries := 3
+		for retry := 0; retry < maxRetries; retry++ {
+			// 获取分块的下载链接
+			property, err := r.notionClient.GetPageProperty(chunk.NotionPageID, r.notionClient.filePageID)
+			if err != nil {
+				if retry == maxRetries-1 {
+					return 0, fmt.Errorf("获取分块%d下载链接失败(重试%d次): %v", r.currentChunk, retry+1, err)
+				}
+				time.Sleep(time.Second * time.Duration(retry+1)) // 递增延迟
+				continue
+			}
+
+			if len(property.Files) == 0 {
+				return 0, fmt.Errorf("分块%d没有文件", r.currentChunk)
+			}
+
+			// 创建HTTP请求获取分块数据
+			reader, err = r.createChunkReader(property.Files[0].File.URL, chunkStart, chunkEnd-chunkStart)
+			if err != nil {
+				if retry == maxRetries-1 {
+					return 0, fmt.Errorf("创建分块%d读取器失败(重试%d次): %v", r.currentChunk, retry+1, err)
+				}
+				time.Sleep(time.Second * time.Duration(retry+1)) // 递增延迟
+				continue
+			}
+
+			// 成功创建reader，跳出重试循环
+			break
 		}
 
 		r.currentReader = reader
@@ -387,14 +417,21 @@ func (r *ChunkedReader) Read(p []byte) (n int, err error) {
 	n, err = r.currentReader.Read(p)
 	r.totalRead += int64(n)
 
-	if err == io.EOF {
-		r.currentReader.Close()
-		r.currentReader = nil
-		r.currentChunk++
+	// 处理读取错误和EOF
+	if err != nil {
+		if err == io.EOF {
+			r.currentReader.Close()
+			r.currentReader = nil
+			r.currentChunk++
 
-		// 如果还有更多数据要读取，继续下一个分块
-		if r.totalRead < r.requestEnd-r.requestStart && r.currentChunk < len(r.chunks) {
-			err = nil
+			// 如果还有更多数据要读取，继续下一个分块
+			if r.totalRead < r.requestEnd-r.requestStart && r.currentChunk < len(r.chunks) {
+				err = nil
+			}
+		} else {
+			// 非EOF错误，关闭当前reader，下次读取时会重新创建
+			r.currentReader.Close()
+			r.currentReader = nil
 		}
 	}
 
@@ -421,15 +458,25 @@ func (r *ChunkedReader) createChunkReader(url string, offset, length int64) (io.
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 
-	client := &http.Client{}
+	// 设置User-Agent和其他必要的头部
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Encoding", "identity")
+
+	// 创建带超时的HTTP客户端，适合大文件下载
+	client := &http.Client{
+		Timeout: time.Minute * 30, // 30分钟超时，适合大文件分块下载
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("发送HTTP请求失败: %v", err)
 	}
 
+	// 检查状态码，206是部分内容，200是完整内容
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP请求失败，状态码: %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP请求失败，状态码: %d, URL: %s", resp.StatusCode, url)
 	}
 
 	return resp.Body, nil

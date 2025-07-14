@@ -1,4 +1,4 @@
-package template
+package notion
 
 import (
 	"github.com/alist-org/alist/v3/internal/driver"

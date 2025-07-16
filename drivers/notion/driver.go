@@ -12,6 +12,7 @@ import (
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/pkg/http_range"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -150,8 +151,14 @@ func (d *Notion) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		// 创建分块Range读取器
 		rangeReadCloser := NewChunkedRangeReadCloser(d.notionClient, chunks, f.Size)
 
+		resultRangeReader := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
+			return rangeReadCloser.RangeRead(ctx, httpRange)
+		}
+
+		resultRangeReadCloser := &model.RangeReadCloser{RangeReader: resultRangeReader}
+
 		return &model.Link{
-			RangeReadCloser: rangeReadCloser,
+			RangeReadCloser: resultRangeReadCloser,
 		}, nil
 	} else {
 		// 单文件，返回直接URL
